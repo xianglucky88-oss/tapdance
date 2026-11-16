@@ -13,27 +13,45 @@ import (
 
 // Report 是一次处理的统计。
 type Report struct {
-	Records     int            `json:"records"`
-	Committed   int            `json:"committed"`
-	Aborted     int            `json:"aborted"`
-	Orphans     int            `json:"orphans"`
-	Pending     int            `json:"pending"`
-	Duplicates  int            `json:"duplicates"`
-	Applied     int            `json:"applied"`
-	Tables      map[string]int `json:"tables"`
-	Checksum    string         `json:"checksum"`
-	BacklogByte uint64         `json:"backlog_bytes"`
-	BacklogSeg  int            `json:"backlog_segments"`
-	LagSeconds  float64        `json:"lag_seconds"`
-	LastLSN     uint64         `json:"last_lsn"`
+	Records   int `json:"records"`
+	Committed int `json:"committed"`
+	Aborted   int `json:"aborted"`
+	Orphans   int `json:"orphans"`
+	// Unattributed 是没有 BEGIN 的完整变更，且 LSN 与已知损坏重叠。
+	Unattributed int            `json:"unattributed"`
+	Pending      int            `json:"pending"`
+	Incomplete   int            `json:"incomplete"`
+	Duplicates   int            `json:"duplicates"`
+	Applied      int            `json:"applied"`
+	Tables       map[string]int `json:"tables"`
+	Checksum     string         `json:"checksum"`
+	BacklogByte  uint64         `json:"backlog_bytes"`
+	BacklogSeg   int            `json:"backlog_segments"`
+	LagSeconds   float64        `json:"lag_seconds"`
+	LastLSN      uint64         `json:"last_lsn"`
+
+	// WAL 层的完整性信息：已读记录与未确认尾部如何向上报告。
+	Pages          int                 `json:"pages"`
+	PageProblems   []wal.PageProblem   `json:"page_problems,omitempty"`
+	RecordProblems []wal.RecordProblem `json:"record_problems,omitempty"`
+	Tail           wal.Tail            `json:"tail"`
+	Resume         wal.Recovery        `json:"resume"`
+	Complete       bool                `json:"complete"`
 }
 
-// Run 处理一个 WAL 文件里的全部记录。
+// Run 处理一个 WAL 文件里的全部记录（调用方已保证记录完整）。
 func Run(recs []wal.Record) Report {
+	return RunScan(&wal.ScanResult{
+		Records: recs,
+		Resume:  wal.Recovery{SafeLSN: wal.LastLSN(recs)},
+	})
+}
+
+// RunScan 处理一次扫描结果，并把页级损坏、记录级不完整和未确认尾部一并
+// 反映在报告中。Records 只包含扫描器确认完整的记录。
+func RunScan(res *wal.ScanResult) Report {
 	asm := txn.New()
-	for _, r := range recs {
-		asm.Feed(r)
-	}
+	ing := asm.FeedScan(res)
 
 	committed := ordering.Sort(asm.Committed())
 	committed, dups := ordering.Dedupe(committed)
@@ -44,7 +62,7 @@ func Run(recs []wal.Record) Report {
 		_ = st.Apply(r, tr)
 	}
 
-	last := wal.LastLSN(recs)
+	last := wal.LastLSN(res.Records)
 	slot := retention.NewSlot("tapdance", 0)
 	slot.Advance(last)
 
@@ -54,19 +72,27 @@ func Run(recs []wal.Record) Report {
 	}
 
 	return Report{
-		Records:     len(recs),
-		Committed:   len(asm.Committed()),
-		Aborted:     asm.Aborted(),
-		Orphans:     asm.Orphans(),
-		Pending:     asm.Pending(),
-		Duplicates:  dups,
-		Applied:     st.Applied,
-		Tables:      tables,
-		Checksum:    st.Checksum(),
-		BacklogByte: slot.Backlog(last),
-		BacklogSeg:  retention.Segments(slot.Backlog(last)),
-		LagSeconds:  lag.Estimate(last, slot.ConfirmedLSN, nil, 1_000_000).Seconds(),
-		LastLSN:     last,
+		Records:        ing.Records,
+		Committed:      len(asm.Committed()),
+		Aborted:        asm.Aborted(),
+		Orphans:        asm.Orphans(),
+		Unattributed:   asm.Unattributed(),
+		Pending:        asm.Pending(),
+		Incomplete:     asm.Incomplete(),
+		Duplicates:     dups,
+		Applied:        st.Applied,
+		Tables:         tables,
+		Checksum:       st.Checksum(),
+		BacklogByte:    slot.Backlog(last),
+		BacklogSeg:     retention.Segments(slot.Backlog(last)),
+		LagSeconds:     lag.Estimate(last, slot.ConfirmedLSN, nil, 1_000_000).Seconds(),
+		LastLSN:        last,
+		Pages:          res.Pages,
+		PageProblems:   res.PageProblems,
+		RecordProblems: res.RecordProblems,
+		Tail:           res.Tail,
+		Resume:         res.Resume,
+		Complete:       !res.HasDamage() && !res.Truncated(),
 	}
 }
 

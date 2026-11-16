@@ -13,10 +13,12 @@ import (
 
 func main() {
 	var (
-		out   = flag.String("out", "/tmp/tapdance/wal.bin", "output WAL path")
-		txns  = flag.Int("txns", 40, "number of committed transactions")
-		seed  = flag.Int64("seed", 20261114, "random seed")
-		corrupt = flag.Bool("corrupt", false, "flip one byte to simulate corruption")
+		out     = flag.String("out", "/tmp/tapdance/wal.bin", "output WAL path")
+		txns    = flag.Int("txns", 40, "number of committed transactions")
+		seed    = flag.Int64("seed", 20261114, "random seed")
+		corrupt = flag.Bool("corrupt", false, "flip one byte in a middle page to simulate page corruption")
+		big     = flag.Int("big", 0, "size in bytes of one cross-page INSERT payload (0 = none)")
+		torn    = flag.Int("torn-tail", 0, "truncate the file to this many bytes to simulate a crash mid-write")
 	)
 	flag.Parse()
 
@@ -35,6 +37,17 @@ func main() {
 	for t := 0; t < *txns; t++ {
 		xid++
 		recs = append(recs, wal.Record{XID: xid, Type: wal.TypeBegin, Payload: nil})
+
+		if t == 2 && *big > 0 {
+			// 一条跨多页的超大行，用于覆盖跨页记录。
+			body := make([]byte, *big)
+			for i := range body {
+				body[i] = byte('a' + i%26)
+			}
+			recs = append(recs, wal.Record{XID: xid, Type: wal.TypeInsert, Payload: mustJSON(map[string]any{
+				"table": "orders", "pk": "BIG-1", "row": map[string]any{"id": "BIG-1", "blob": string(body)},
+			})})
+		}
 
 		switch {
 		case t == 5:
@@ -97,9 +110,16 @@ func main() {
 
 	if *corrupt {
 		raw, _ := os.ReadFile(*out)
-		if len(raw) > wal.PageSize*2+20 {
-			raw[wal.PageSize+20] ^= 0xFF
+		// 翻转文件中间一页的负载字节，模拟页级校验失败；前后页仍应可读。
+		if page := len(raw) / wal.PageSize / 2; page > 1 {
+			raw[page*wal.PageSize+wal.HeaderSize+3] ^= 0xFF
 			_ = os.WriteFile(*out, raw, 0o644)
+		}
+	}
+	if *torn > 0 {
+		raw, _ := os.ReadFile(*out)
+		if *torn < len(raw) {
+			_ = os.WriteFile(*out, raw[:*torn], 0o644)
 		}
 	}
 
