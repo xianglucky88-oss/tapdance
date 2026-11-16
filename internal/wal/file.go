@@ -51,10 +51,15 @@ func ReadFile(path string) ([]Record, error) {
 	return out, nil
 }
 
-// LastLSN 返回最后一条记录的 LSN。
+// LastLSN 返回全部记录中最大的 LSN。
+//
+// 不能取切片最后一条：乱序到达/重放拼接后，最后一条不一定是位点最大的记录。
 func LastLSN(recs []Record) uint64 {
-	if len(recs) == 0 {
-		return 0
+	var max uint64
+	for _, r := range recs {
+		if r.LSN > max {
+			max = r.LSN
+		}
 	}
-	return recs[len(recs)-1].LSN
+	return max
 }
