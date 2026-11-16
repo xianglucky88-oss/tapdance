@@ -13,9 +13,9 @@ import (
 
 func main() {
 	var (
-		out   = flag.String("out", "/tmp/tapdance/wal.bin", "output WAL path")
-		txns  = flag.Int("txns", 40, "number of committed transactions")
-		seed  = flag.Int64("seed", 20261114, "random seed")
+		out     = flag.String("out", "/tmp/tapdance/wal.bin", "output WAL path")
+		txns    = flag.Int("txns", 40, "number of committed transactions")
+		seed    = flag.Int64("seed", 20261114, "random seed")
 		corrupt = flag.Bool("corrupt", false, "flip one byte to simulate corruption")
 	)
 	flag.Parse()

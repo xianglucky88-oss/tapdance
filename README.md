@@ -14,17 +14,34 @@ make test     # 单元测试
 ## 结构
 
 ```
-cmd/tapdance      解析入口
+cmd/tapdance      解析入口（-consumer / -checkpoint / -fallback-bps 注入复制视图输入）
 cmd/walgen        WAL 生成器（测试用）
 internal/wal      页格式、编解码、文件读写
 internal/txn      事务组装与可见性
 internal/schema   DDL 跟踪与列改名映射
 internal/ordering LSN 排序与去重
-internal/retention 复制槽位点与积压
-internal/lag      LSN → 时间延迟换算
+internal/retention 复制槽状态机、位点与多槽保留边界
+internal/lag      LSN → 时间延迟换算（checkpoint 采样速率）
 internal/store    内存表与快照校验和
-internal/pipeline 链路编排
+internal/pipeline 链路编排与复制视图报告
 ```
+
+## 复制视图（backlog / segments / lag）
+
+管道只负责"处理到哪里"（`last_lsn` = 本批记录的最高 LSN），
+消费者的确认进度由 `-consumer name@confirmedLSN[,down]` 显式注入，
+两者绝不混为一谈：
+
+- `slots[]`：每个槽位的状态（`active` / `disconnected` / `reconnected`）、
+  确认位点、积压、段数、延迟。断连的槽位位点冻结，但仍钉住保留边界。
+- `retain_from_lsn`：所有槽位中最小的 restart_lsn，即 WAL 保留边界；
+  没有槽位时为 `null`（没有保留需求，`lag_basis=no_slots`）。
+- 顶层 `backlog_bytes` / `backlog_segments` / `lag_seconds` 取最落后的槽位。
+- `lag_basis` 区分延迟的依据：`caught_up`（已追平）、`checkpoints`
+  （采样速率，停顿区间不计入）、`fallback`（兜底速率）、`unknown`
+  （无法估算，`lag_seconds=-1`）。
+- 确认位点倒退会被拒绝并计入 `slots[].regressions`；
+  断连期间的推进被忽略；`current` 倒挂时积压为 0 而不会回绕。
 
 ## WAL 格式
 

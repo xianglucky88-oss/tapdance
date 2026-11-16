@@ -58,3 +58,17 @@ func LastLSN(recs []Record) uint64 {
 	}
 	return recs[len(recs)-1].LSN
 }
+
+// MaxLSN 返回记录中的最高 LSN。
+//
+// 记录可能乱序（多文件合并、重放），"处理到达点"应取最高值，
+// 而不是最后一条记录的 LSN。
+func MaxLSN(recs []Record) uint64 {
+	var max uint64
+	for _, r := range recs {
+		if r.LSN > max {
+			max = r.LSN
+		}
+	}
+	return max
+}
